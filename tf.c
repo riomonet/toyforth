@@ -4,8 +4,8 @@
 #include <ctype.h>
 #include <string.h>
 
-
 /* ================================== Data Structures =========================================== */
+
 #define TFOBJ_TYPE_INT 0
 #define TFOBJ_TYPE_STR 1
 #define TFOBJ_TYPE_BOOL 2
@@ -18,7 +18,7 @@ typedef struct tfobj {
     union {
 	int i;
 	struct {
-	    char *str;
+	    char *ptr;
 	    size_t len;
 	} str;
 	struct {
@@ -58,11 +58,12 @@ tfobj *createObject(int type) {
     return o;
 }
 
-
 tfobj *createStringObject(char *s, size_t len) {
     tfobj *o = createObject(TFOBJ_TYPE_STR);
-    o->str.str = s;
+    o->str.ptr = xmalloc(len + 1);
     o->str.len = len;
+    memcpy(o->str.ptr,s,len);
+    o->str.ptr[len] = 0;
     return o;
 }
 
@@ -84,7 +85,6 @@ tfobj *createBoolObject(int i) {
     return o;
 }
 
-
 /* ==========================================List Object ========================================== */
 
 tfobj *createListObject(void) {
@@ -104,8 +104,8 @@ void listPush(tfobj *o, tfobj *ele) {
     o->list.len++;
 }
 
-
 /* =============================== Turn program into toy forth list ============================== */
+
 void parseSpaces(tfparser *parser) {
     while(isspace(parser->p[0])) parser->p++;
 }
@@ -129,6 +129,23 @@ tfobj *parseNumber(tfparser *parser) {
     return o;
 }
 
+/* Return true if the character 'c' is one of the characters
+ * acceptable for our symbols. */
+int is_symbol_char(int c) {
+    char symchars[] = "+-*/%";
+    return isalpha(c) || strchr(symchars,c) != NULL;
+}
+
+
+tfobj *parseSymbol(tfparser *parser) {
+    char *start = parser->p;
+    
+    while (parser->p[0] && is_symbol_char(parser->p[0])) parser->p++;
+    int len = parser->p - start;
+    if (len >= MAX_NUM_LEN) return NULL;
+    return createSymbolObject(start, len);
+}
+
 tfobj *compile(char *prg) {
     tfparser parser;
     parser.prg = prg;
@@ -143,14 +160,18 @@ tfobj *compile(char *prg) {
 	parseSpaces(&parser);
 	if(parser.p[0] == 0) break; //End of program reached.
 	
-	if(isdigit(parser.p[0]) || parser.p[0] == '-') {
-	    o = parseNumber(&parser);
+	if(isdigit(parser.p[0]) ||
+	   (parser.p[0] == '-' && isdigit(parser.p[1]))) {
+	     o = parseNumber(&parser);
+	} else if(is_symbol_char(parser.p[0])) {
+	    o = parseSymbol(&parser);
 	} else {
 	    o = NULL;
 	}
 
 	// Check if the current token produced a parsing error.
-	if(o == NULL) { 
+	if(o == NULL) {
+	    // TODO: release parsed here.
 	    printf("Syntax error near: %32s ...\n", token_start);
 	    return NULL;
 	} else {
@@ -159,26 +180,34 @@ tfobj *compile(char *prg) {
     }
     return parsed;
 }
+
 /* ======================================= Execute the program ============================================= */
-void exec(tfobj * prg) {
-    printf("[");
-    for(size_t j = 0; j < prg->list.len; j++) {
-	tfobj *o = prg->list.ele[j];
-	switch(o->type) {
-	case TFOBJ_TYPE_INT:
-	    printf("%d", o->i);
-	    if(j < prg->list.len - 1) {
-		printf(" ");
-	    }
-	    break;
-	default:
-	    printf("?");
-	    break;
+
+void print_object(tfobj *o) { 
+    switch(o->type) {
+    case TFOBJ_TYPE_INT:
+	printf("%d", o->i);
+	break;
+    case TFOBJ_TYPE_LIST:
+	printf("[");
+	for(size_t j = 0; j < o->list.len; j++) {
+	    tfobj *ele = o->list.ele[j];
+	    print_object(ele);
+	    printf(" ");
 	}
+	printf("]");
+	break;
+    case TFOBJ_TYPE_SYMBOL:
+	printf("'%s",o->str.ptr);
+	break;
+    default:
+	printf("?");
+	break;
     }
-    printf("]\n");
 }
+ 
 /* ============================================ Main ============================================= */
+
 int main(int argc, char **argv) {
     if (argc != 2) {
 	fprintf(stderr,"Usage: %s <filename>\n", argv[0]);
@@ -203,6 +232,7 @@ int main(int argc, char **argv) {
     fclose(fp);
 
     tfobj *prg = compile(prgtxt);
-    exec(prg);
+    print_object(prg);
+    printf("\n");
     return 0;
 }
