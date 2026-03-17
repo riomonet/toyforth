@@ -4,7 +4,6 @@
 #include <ctype.h>
 #include <string.h>
 #include <assert.h>
-
 /* ================================== Data Structures =========================================== */
 
 #define TFOBJ_TYPE_INT 0
@@ -34,25 +33,29 @@ typedef struct tfparser {
     char *p;   // Next token to parse.
 } tfparser;
 
-
 /* Function table entry: each of this entry represents a symbol name
- * assoicated with a function implmentation. */
-struct FunctionTableEntry {
+ * assoicated with a function implementation. */
+struct tfctx;
+typedef struct FunctionTableEntry {
     tfobj *name;
-    void (*callback) (tfctx *ctx, tfobj *name);
-    tfobj *user_list;  // User defined functions.
-};
+    void (*callback) (struct tfctx *ctx, tfobj *name);
+    tfobj *user_func;  // User defined functions.
+} tffuncentry;
 
 struct FunctionTable {
-    struct FunctionTableEntry **func_table;
+    struct tffunccentry **func_table;
     size_t func_count;
 };
 
 /* Our execution context. */
 typedef struct tfctx {
     tfobj *stack;
-    struct FunctionTableEntry *functable;
+    struct FunctionTable functable;
 } tfctx;
+/* ====================================== Function prototypes ==================================== */
+
+void retain(tfobj *o);
+void release(tfobj *o);
 
 /* ===================================== Allocation wrappers ===================================== */
 void *xmalloc(size_t size) {
@@ -81,21 +84,6 @@ tfobj *createObject(int type) {
     tfobj *o = xmalloc(sizeof(tfobj));
     o->type = type;
     o->refcount = 1;
-    return o;
-}
-
-tfobj *createStringObject(char *s, size_t len) {
-    tfobj *o = createObject(TFOBJ_TYPE_STR);
-    o->str.ptr = xmalloc(len + 1);
-    o->str.len = len;
-    memcpy(o->str.ptr,s,len);
-    o->str.ptr[len] = 0;
-    return o;
-}
-
-tfobj *createSymbolObject(char *s, size_t len) {
-    tfobj *o = createStringObject(s,len);
-    o->type = (TFOBJ_TYPE_SYMBOL);
     return o;
 }
 
@@ -164,6 +152,38 @@ void print_object(tfobj *o) {
     default:
 	printf("?");
 	break;
+    }
+}
+
+/* ======================================== String Object ========================================= */
+
+tfobj *createStringObject(char *s, size_t len) {
+    tfobj *o = createObject(TFOBJ_TYPE_STR);
+    o->str.ptr = xmalloc(len + 1);
+    o->str.len = len;
+    memcpy(o->str.ptr,s,len);
+    o->str.ptr[len] = 0;
+    return o;
+}
+
+tfobj *createSymbolObject(char *s, size_t len) {
+    tfobj *o = createStringObject(s,len);
+    o->type = (TFOBJ_TYPE_SYMBOL);
+    return o;
+}
+/* Compare the two string objects 'a'  and 'b', returns 0 if they are
+ * the same, '1' if a > b, '-1' if a < b. The comparison is performed
+ * using memcmp(). */
+int compareStringObject(tfobj *a,tfobj *b) {
+    size_t minlen = a->str.len < b->str.len ? a->str.len : b->str.len;
+    int cmp = memcmp(a->str.ptr, b->str.ptr, minlen);
+    if (cmp == 0) {
+	if (a->str.len == b->str.len) return 0;
+	else if (a->str.len > b->str.len) return 1;
+	else return -1;
+    } else {
+	if (cmp < 0) return -1;
+	else return 1;
     }
 }
 
@@ -263,23 +283,88 @@ tfobj *compile(char *prg) {
     return parsed;
 }
 
-/* =================================== Execution and context ==================================== =*/
+/* ==================================== Standard Library ========================================= */
+
+// registerFunction(ctx, "+",basicMathFunctions);
+ void basicMathFunctions(tfctx *ctx, tfobj *name) {
+    if (ctxCheckStackMinLen(ctx, 2)) return;
+    tfobj *a = ctxStackPop(ctx,TFOBJ_TYPE_INT);
+    tfobj *b = ctxStackPop(ctx,TFOBJ_TYPE_INT);
+    if (a == NULL || b == NULL)  return;
+
+    int result;
+    switch(name->str.ptr[0]) {
+    case '+': result = a->i + b->i; break;
+    case '-': result = a->i - b->i; break;
+    case '*': result = a->i * b->i; break;
+    }
+	
+    ctxStackPush(ctx,createIntObject(result));
+  }
+
+/* =================================== Execution and context ===================================== */
 tfctx *createContext(void) {
     tfctx *ctx = xmalloc(sizeof(*ctx));
     ctx->stack = createListObject();
     ctx->functable.func_table = NULL;
     ctx->functable.func_count = 0;
-    registerFunction(ctx, "+",basicMathFunctions);
     return ctx;
+}
+
+tffuncentry *getFunctionByName(tfctx *ctx,tfobj *name) {
+    for (size_t j = 0; j < ctx->functable.func_count; j++) {
+	tffuncentry *fe = ctx->functable.func_table[j];
+	if (compareStringObject(fe->name, name) == 0)
+	    return fe;
+    }
+    return NULL;
+}
+/* Push a new function entry into the ctx. It's up to the caller
+ * to set the C callback or the list representing the user
+ * defined function. */
+tffuncentry *registerFunction(tfctx *ctx, tfobj *name) {
+    ctx->functable.func_table =
+	xrealloc(ctx->functable.func_table,
+		 sizeof(tffuncentry*) * (ctx->functable.func_count + 1));
+    tffuncentry *fe = xmalloc(sizeof(tffuncentry));
+    ctx->functable.func_table[ctx->functable.func_count] = fe; 
+    ctx->functable.func_count++;
+    fe->name = name;
+    retain(name);
+    fe->callback = NULL;
+    fe->user_func = NULL;
+    return fe;
+}
+
+/* Register a new function with the given name in the the function table
+ * of the context.  The function can't fail since if a function with the
+ * same name already exists it gets replaced by the new one. */
+void registerCFunction(tfctx *ctx, char *name,
+		      void (*callback) (tfctx *ctx, tfobj *name)) {
+    tffuncentry *fe;
+    tfobj *oname = createStringObject(name, strlen(name));
+    fe = getFunctionByName(ctx,oname);
+    if (fe) {
+	if (fe->user_func) {
+	    release(fe->user_func);
+	    fe->user_func = NULL;
+	}
+	fe->callback = callback;
+    } else {
+	fe = registerFunction(ctx, oname);
+	fe->callback = callback;
+    } 
+    release(oname);
 }
 
 /* Try to resolve and call the function  associated with the symbol
  * name 'word'. Return 0 if the symbol was actually found and bound
  * to some function, return 1 otherwise. */ 
-void callSymbol(tfctx *ctx, tfobj *word) {
-    
+int callSymbol(tfctx *ctx, tfobj *word) {
+    tffuncentry *pe = getFunctionByName(ctx,word);
+    if (pe == NULL) return 1;
+    return 0;
 }
-
 
 /* Execute the Toy Forth program stored in the list 'prg'. */
 void exec(tfctx *ctx, tfobj *prg) {
@@ -297,7 +382,7 @@ void exec(tfctx *ctx, tfobj *prg) {
 	}
     }
 }
- 
+
 /* ============================================ Main ============================================= */
 
 int main(int argc, char **argv) {
