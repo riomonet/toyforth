@@ -1,3 +1,4 @@
+//(setq c-basic-offset 4)
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -5,6 +6,9 @@
 #include <string.h>
 #include <assert.h>
 /* ================================== Data Structures =========================================== */
+
+#define TF_OK 0
+#define TF_ERR 1
 
 #define TFOBJ_TYPE_INT 0
 #define TFOBJ_TYPE_STR 1
@@ -16,15 +20,15 @@ typedef struct tfobj {
     int refcount;
     int type; // TFOBJ_TYPE_*
     union {
-	int i;
-	struct {
-	    char *ptr;
-	    size_t len;
-	} str;
-	struct {
-	    struct tfobj **ele;
-	    size_t len;
-	} list;
+        int i;
+        struct {
+            char *ptr;
+            size_t len;
+        } str;
+        struct {
+            struct tfobj **ele;
+            size_t len;
+        } list;
     };
 } tfobj;
 
@@ -36,9 +40,10 @@ typedef struct tfparser {
 /* Function table entry: each of this entry represents a symbol name
  * assoicated with a function implementation. */
 struct tfctx;
+
 typedef struct FunctionTableEntry {
     tfobj *name;
-    void (*callback) (struct tfctx *ctx, tfobj *name);
+    int (*callback) (struct tfctx *ctx, char *name);
     tfobj *user_func;  // User defined functions.
 } tffuncentry;
 
@@ -61,8 +66,8 @@ void release(tfobj *o);
 void *xmalloc(size_t size) {
     void *ptr = malloc(size);
     if (ptr == NULL) {
-	fprintf(stderr,"Out of memory allocating %zu bytes\n", size);
-	exit(1);
+        fprintf(stderr,"Out of memory allocating %zu bytes\n", size);
+        exit(1);
     }
     return ptr;
 }
@@ -70,8 +75,8 @@ void *xmalloc(size_t size) {
 void *xrealloc(void *oldptr, size_t size) {
     void *ptr = realloc(oldptr, size);
     if (ptr == NULL) {
-	fprintf(stderr,"Out of memory allocating %zu bytes\n", size);
-	exit(1);
+        fprintf(stderr,"Out of memory allocating %zu bytes\n", size);
+        exit(1);
     }
     return ptr;
 }
@@ -110,15 +115,15 @@ void release(tfobj *o);
 void freeObject(tfobj *o) {
     switch(o->type) {
     case TFOBJ_TYPE_LIST:
-	for(size_t j = 0; j < o->list.len; j++) {
-	    tfobj *ele = o->list.ele[j];
-	    release(ele);
-	}
-	break;
+        for(size_t j = 0; j < o->list.len; j++) {
+            tfobj *ele = o->list.ele[j];
+            release(ele);
+        }
+        break;
     case TFOBJ_TYPE_SYMBOL:
     case TFOBJ_TYPE_STR:
-	free(o->str.ptr);
-	break;
+        free(o->str.ptr);
+        break;
     }
     free(o);
 }
@@ -132,26 +137,26 @@ void release(tfobj *o) {
 void print_object(tfobj *o) { 
     switch(o->type) {
     case TFOBJ_TYPE_INT:
-	printf("%d", o->i);
-	break;
+        printf("%d", o->i);
+        break;
     case TFOBJ_TYPE_LIST:
-	printf("[");
-	for(size_t j = 0; j < o->list.len; j++) {
-	    tfobj *ele = o->list.ele[j];
-	    print_object(ele);
-	    if(j != o->list.len - 1)
-		printf(" ");
-	}
-	printf("]");
-	break;
+        printf("[");
+        for(size_t j = 0; j < o->list.len; j++) {
+            tfobj *ele = o->list.ele[j];
+            print_object(ele);
+            if(j != o->list.len - 1)
+                printf(" ");
+        }
+        printf("]");
+        break;
     case TFOBJ_TYPE_STR:
-	printf("\"%s\"",o->str.ptr);
-	break;
+        printf("\"%s\"",o->str.ptr);
+        break;
     case TFOBJ_TYPE_SYMBOL:
-	break;
+        break;
     default:
-	printf("?");
-	break;
+        printf("?");
+        break;
     }
 }
 
@@ -178,12 +183,12 @@ int compareStringObject(tfobj *a,tfobj *b) {
     size_t minlen = a->str.len < b->str.len ? a->str.len : b->str.len;
     int cmp = memcmp(a->str.ptr, b->str.ptr, minlen);
     if (cmp == 0) {
-	if (a->str.len == b->str.len) return 0;
-	else if (a->str.len > b->str.len) return 1;
-	else return -1;
+        if (a->str.len == b->str.len) return 0;
+        else if (a->str.len > b->str.len) return 1;
+        else return -1;
     } else {
-	if (cmp < 0) return -1;
-	else return 1;
+        if (cmp < 0) return -1;
+        else return 1;
     }
 }
 
@@ -205,6 +210,7 @@ void listPush(tfobj *o, tfobj *ele) {
     o->list.ele[o->list.len] = ele;
     o->list.len++;
 }
+
 
 /* =============================== Turn program into toy forth list ============================== */
 
@@ -256,53 +262,83 @@ tfobj *compile(char *prg) {
     tfobj *parsed = createListObject();
     
     while(parser.p) {
-	tfobj *o;
-	char *token_start = parser.p;
+        tfobj *o;
+        char *token_start = parser.p;
 	
-	parseSpaces(&parser);
-	if(parser.p[0] == 0) break; //End of program reached.
+        parseSpaces(&parser);
+        if(parser.p[0] == 0) break; //End of program reached.
 	
-	if(isdigit(parser.p[0]) ||
-	   (parser.p[0] == '-' && isdigit(parser.p[1]))) {
-	     o = parseNumber(&parser);
-	} else if(is_symbol_char(parser.p[0])) {
-	    o = parseSymbol(&parser);
-	} else {
-	    o = NULL;
-	}
+        if(isdigit(parser.p[0]) ||
+           (parser.p[0] == '-' && isdigit(parser.p[1]))) {
+            o = parseNumber(&parser);
+        } else if(is_symbol_char(parser.p[0])) {
+            o = parseSymbol(&parser);
+        } else {
+            o = NULL;
+        }
 
-	// Check if the current token produced a parsing error.
-	if(o == NULL) {
-	    release(parsed);
-	    printf("Syntax error near: %32s ...\n", token_start);
-	    return NULL;
-	} else {
-	    listPush(parsed,o);
-	}
+        // Check if the current token produced a parsing error.
+        if(o == NULL) {
+            release(parsed);
+            printf("Syntax error near: %32s ...\n", token_start);
+            return NULL;
+        } else {
+            listPush(parsed,o);
+        }
     }
     return parsed;
 }
 
 /* ==================================== Standard Library ========================================= */
 
-// registerFunction(ctx, "+",basicMathFunctions);
- void basicMathFunctions(tfctx *ctx, tfobj *name) {
-    if (ctxCheckStackMinLen(ctx, 2)) return;
+//sregisterFunction(ctx, "+",basicMathFunctions);
+int basicMathFunctions(tfctx *ctx, char *name) {
+    if (ctxCheckStackMinLen(ctx, 2)) return TF_ERR;
     tfobj *a = ctxStackPop(ctx,TFOBJ_TYPE_INT);
     tfobj *b = ctxStackPop(ctx,TFOBJ_TYPE_INT);
-    if (a == NULL || b == NULL)  return;
+      
+    if (a == NULL || b == NULL)  return TF_ERR;
 
+    /* tfobj *a = NULL; */
+    /* tfobj *b = NULL; */
+     
+   
     int result;
-    switch(name->str.ptr[0]) {
+    switch(name[0]) {
     case '+': result = a->i + b->i; break;
     case '-': result = a->i - b->i; break;
     case '*': result = a->i * b->i; break;
     }
 	
-    ctxStackPush(ctx,createIntObject(result));
-  }
+    // ctxStackPush(ctx,createIntObject(result));
+    return TF_OK;
+}
 
 /* =================================== Execution and context ===================================== */
+int ctxCheckStackMinLen(tfctx *ctx, int min);
+
+/* Pop the top element from the interpreter main stack, assuming it
+ * will match 'type', otherwise NULL is returned. Also the function
+ * returns NULL if the stack is empty
+ *
+ * Ther reference counting of the popped object is not modified: it
+ * is assumed that we just transfer the stack to the caller. */
+tfobj *ctxStackPop(tfctx *ctx,int type) {
+    tfobj *stack = ctx->stack;
+    if(stack->list.len == 0) return NULL;
+    if(stack->list.ele[ctx->stack->list.len-1]->type != type) return NULL;
+    
+    o->list.ele = xrealloc(o->list.ele, sizeof(tfobj*) * (o->list.len+1)); // ?
+    o->list.ele[o->list.len] = ele;
+    o->list.len++;
+}
+
+/* Just push the object on the main stack. */
+void ctxStackPush(tfctx *ctx,tfobj *o) {
+    listPush(ctx->stack,obj);
+}
+
+
 tfctx *createContext(void) {
     tfctx *ctx = xmalloc(sizeof(*ctx));
     ctx->stack = createListObject();
@@ -311,11 +347,14 @@ tfctx *createContext(void) {
     return ctx;
 }
 
+/* Resolve the function scanning the function table looking for a matching
+ * name.  If a matching function was not found NULL is returned, otherwise
+ * the function returns the function entry object */
 tffuncentry *getFunctionByName(tfctx *ctx,tfobj *name) {
     for (size_t j = 0; j < ctx->functable.func_count; j++) {
-	tffuncentry *fe = ctx->functable.func_table[j];
-	if (compareStringObject(fe->name, name) == 0)
-	    return fe;
+        tffuncentry *fe = (tffuncentry*)ctx->functable.func_table[j];
+        if (compareStringObject(fe->name, name) == 0)
+            return fe;
     }
     return NULL;
 }
@@ -324,8 +363,8 @@ tffuncentry *getFunctionByName(tfctx *ctx,tfobj *name) {
  * defined function. */
 tffuncentry *registerFunction(tfctx *ctx, tfobj *name) {
     ctx->functable.func_table =
-	xrealloc(ctx->functable.func_table,
-		 sizeof(tffuncentry*) * (ctx->functable.func_count + 1));
+        xrealloc(ctx->functable.func_table,
+                 sizeof(tffuncentry*) * (ctx->functable.func_count + 1));
     tffuncentry *fe = xmalloc(sizeof(tffuncentry));
     ctx->functable.func_table[ctx->functable.func_count] = fe; 
     ctx->functable.func_count++;
@@ -340,19 +379,19 @@ tffuncentry *registerFunction(tfctx *ctx, tfobj *name) {
  * of the context.  The function can't fail since if a function with the
  * same name already exists it gets replaced by the new one. */
 void registerCFunction(tfctx *ctx, char *name,
-		      void (*callback) (tfctx *ctx, tfobj *name)) {
+                       int (*callback) (tfctx *ctx, tfobj *name)) {
     tffuncentry *fe;
     tfobj *oname = createStringObject(name, strlen(name));
     fe = getFunctionByName(ctx,oname);
     if (fe) {
-	if (fe->user_func) {
-	    release(fe->user_func);
-	    fe->user_func = NULL;
-	}
-	fe->callback = callback;
+        if (fe->user_func) {
+            release(fe->user_func);
+            fe->user_func = NULL;
+        }
+        fe->callback = callback;
     } else {
-	fe = registerFunction(ctx, oname);
-	fe->callback = callback;
+        fe = registerFunction(ctx, oname);
+        fe->callback = callback;
     } 
     release(oname);
 }
@@ -361,40 +400,49 @@ void registerCFunction(tfctx *ctx, char *name,
  * name 'word'. Return 0 if the symbol was actually found and bound
  * to some function, return 1 otherwise. */ 
 int callSymbol(tfctx *ctx, tfobj *word) {
-    tffuncentry *pe = getFunctionByName(ctx,word);
-    if (pe == NULL) return 1;
-    return 0;
+    tffuncentry *fe = getFunctionByName(ctx,word);
+    if (fe == NULL) return TF_ERR;
+    if (fe->user_func) {
+        // TODO:(ari)
+        return TF_ERR;
+    } else {
+        return fe->callback(ctx, fe->name->str.ptr);
+    }
 }
 
 /* Execute the Toy Forth program stored in the list 'prg'. */
-void exec(tfctx *ctx, tfobj *prg) {
+int exec(tfctx *ctx, tfobj *prg) {
     assert(prg->type == TFOBJ_TYPE_LIST);
     for(size_t j = 0; j < prg->list.len; j++) {
-	tfobj *word = prg->list.ele[j];
-	switch(word->type) {
-	case TFOBJ_TYPE_SYMBOL:
-	    callSymbol(ctx, word);
-	    break;
-	default:
-	    listPush(ctx->stack, word);
-	    retain(word);
-	    break;
-	}
+        tfobj *word = prg->list.ele[j];
+        switch(word->type) {
+        case TFOBJ_TYPE_SYMBOL:
+            if (callSymbol(ctx, word) == TF_ERR) {
+                printf("Run time error\n");
+                return TF_ERR;
+            }
+            break;
+        default:
+            listPush(ctx->stack, word);
+            retain(word);
+            break;
+        }
     }
+    return TF_OK;
 }
 
 /* ============================================ Main ============================================= */
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-	fprintf(stderr,"Usage: %s <filename>\n", argv[0]);
-	return (1);
+        fprintf(stderr,"Usage: %s <filename>\n", argv[0]);
+        return (1);
     }
     /* Read the program in memory, for later parsing */
     FILE *fp = fopen(argv[1],"r");
     if (fp == NULL) {
-	perror("Opening Toy Forth program");
-	return 1;
+        perror("Opening Toy Forth program");
+        return 1;
     }
     fseek(fp, 0, SEEK_END);
     long file_size = ftell(fp);
@@ -402,8 +450,8 @@ int main(int argc, char **argv) {
     char *prgtxt = xmalloc(file_size + 1);
     size_t bytes_read = fread(prgtxt, 1, file_size, fp);
     if (bytes_read  != (size_t)file_size) {
-	fprintf(stderr, "Reading file");
-	return(1);
+        fprintf(stderr, "Reading file");
+        return(1);
     }
     prgtxt[file_size] = 0;
     fclose(fp);
